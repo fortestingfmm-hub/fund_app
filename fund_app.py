@@ -1,99 +1,119 @@
 import streamlit as st
 import requests
-import json
-import re
 import pandas as pd
 from datetime import datetime
 
-# 设置页面配置
-st.set_page_config(page_title="实时基金估值监控", layout="wide")
+# 页面基础配置
+st.set_page_config(page_title="全品种基金实时监控", layout="wide")
 
-# --- 数据抓取逻辑 ---
-def get_fund_estimate(fund_code):
-    """从天天基金获取实时估值"""
-    url = f"http://fundgz.1234567.com.cn/js/{fund_code}.js"
+# --- 核心：使用东方财富 App 接口 ---
+def get_realtime_data(fund_code):
+    """
+    通过东方财富 Mobile 接口获取实时估值
+    支持普通基金、LOF(161226)、ETF联接等
+    """
+    # 东方财富实时估值详情接口
+    url = f"https://fundmobapi.eastmoney.com/FundMApi/FundVarietieValuationDetail.ashx"
+    params = {
+        "FCODE": fund_code,
+        "deviceid": "123456",
+        "version": "6.5.5",
+        "appversion": "6.5.5",
+        "plat": "Android"
+    }
+    
     try:
-        response = requests.get(url, timeout=5)
-        # 接口返回的是 jsonpgz({...}) 格式，需要正则提取
-        content = response.text
-        json_str = re.findall(r"jsonpgz\((.*)\)", content)[0]
-        data = json.loads(json_str)
-        return {
-            "代码": data['fundcode'],
-            "名称": data['name'],
-            "单位净值": data['dwjz'],
-            "估值": data['gsz'],
-            "日涨幅(%)": data['gszzl'],
-            "更新时间": data['gztime']
-        }
+        response = requests.get(url, params=params, timeout=5)
+        res_json = response.json()
+        
+        if res_json['ErrCode'] == 0:
+            data = res_json['Datas']
+            # gsz: 估值, gszzl: 估值涨幅, jztime: 估值时间
+            return {
+                "基金代码": fund_code,
+                "基金名称": data['SHORTNAME'],
+                "实时估值": data['gz'],
+                "当日涨跌幅": f"{data['gszzl']}%",
+                "数值涨幅": float(data['gszzl']) if data['gszzl'] else 0.0,
+                "单位净值(昨日)": data['dwjz'],
+                "更新时间": data['gztime']
+            }
+        else:
+            return None
     except Exception as e:
         return None
 
-# --- 初始化持仓数据 ---
-if 'holdings' not in st.session_state:
-    # 默认展示几个常用基金
-    st.session_state.holdings = ['000001', '320007']
+# --- Session State 初始化 ---
+if 'my_funds' not in st.session_state:
+    # 默认加入 161226 (白银期货) 和 000001
+    st.session_state.my_funds = ['161226', '000001']
 
-# --- UI 界面布局 ---
-st.title("📈 基金实时估值助手")
-
-# 侧边栏：添加持仓
+# --- 侧边栏：增删管理 ---
 with st.sidebar:
-    st.header("添加持仓")
-    new_code = st.text_input("输入基金代码 (6位)", max_chars=6)
-    if st.button("➕ 加入持仓"):
-        if new_code and len(new_code) == 6:
-            if new_code not in st.session_state.holdings:
-                st.session_state.holdings.append(new_code)
-                st.success(f"代码 {new_code} 已添加")
-                st.rerun() # 立即刷新
+    st.header("⚙️ 持仓管理")
+    
+    # 添加基金
+    new_fund = st.text_input("输入基金代码", max_chars=6, placeholder="例如: 161226")
+    if st.button("➕ 加入持仓", use_container_width=True):
+        if new_fund and len(new_fund) == 6:
+            if new_fund not in st.session_state.my_funds:
+                st.session_state.my_funds.append(new_fund)
+                st.rerun()
             else:
                 st.warning("该基金已在列表中")
         else:
-            st.error("请输入有效的6位代码")
+            st.error("请输入6位基金代码")
 
     st.divider()
-    if st.button("🗑️ 清空所有"):
-        st.session_state.holdings = []
-        st.rerun()
+    
+    # 删除基金
+    st.subheader("🗑️ 移除持仓")
+    for code in st.session_state.my_funds:
+        col_code, col_btn = st.columns([3, 1])
+        col_code.write(code)
+        if col_btn.button("❌", key=f"del_{code}"):
+            st.session_state.my_funds.remove(code)
+            st.rerun()
 
-# 主页面操作栏
-col1, col2 = st.columns([1, 6])
-with col1:
-    if st.button("🔄 手动刷新"):
-        st.rerun()
-with col2:
-    st.write(f"最后刷新时间: {datetime.now().strftime('%H:%M:%S')}")
+# --- 主界面 ---
+st.title("📊 基金/LOF 实时估值看板")
 
-# --- 展示持仓列表 ---
-if not st.session_state.holdings:
-    st.info("当前持仓为空，请在侧边栏添加基金代码。")
+# 顶部操作栏
+c1, c2 = st.columns([1, 4])
+with c1:
+    if st.button("🔄 刷新行情", type="primary"):
+        st.rerun()
+with c2:
+    st.write(f"最后刷新：{datetime.now().strftime('%H:%M:%S')}")
+
+# 获取并显示数据
+if not st.session_state.my_funds:
+    st.info("左侧菜单输入代码，开始监控基金。")
 else:
-    all_data = []
-    with st.spinner('正在获取实时估值...'):
-        for code in st.session_state.holdings:
-            res = get_fund_estimate(code)
-            if res:
-                all_data.append(res)
-            else:
-                st.error(f"无法获取代码 {code} 的数据，请检查代码是否正确")
-
-    if all_data:
-        df = pd.DataFrame(all_data)
+    results = []
+    with st.spinner('正在调取最新接口数据...'):
+        for code in st.session_state.my_funds:
+            data = get_realtime_data(code)
+            if data:
+                results.append(data)
+    
+    if results:
+        df = pd.DataFrame(results)
         
-        # 样式美化：涨红跌绿
-        def color_growth(val):
-            val = float(val)
-            color = 'red' if val > 0 else 'green' if val < 0 else 'black'
-            return f'color: {color}'
+        # 涨跌幅颜色处理
+        def color_pick(val):
+            try:
+                num = float(val.replace('%', ''))
+                if num > 0: return 'color: #ef5350; font-weight: bold;' # 红
+                if num < 0: return 'color: #26a69a; font-weight: bold;' # 绿
+            except:
+                pass
+            return 'color: gray;'
 
-        # 显示表格
-        st.dataframe(
-            df.style.applymap(color_growth, subset=['日涨幅(%)']),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # 简单的统计展示
-        avg_gain = df['日涨幅(%)'].astype(float).mean()
-        st.metric("今日平均涨幅", f"{avg_gain:.2f}%", delta=f"{avg_gain:.2f}%")
+        # 渲染表格
+        st.table(df.drop(columns=['数值涨幅']).style.applymap(color_pick, subset=['当日涨跌幅']))
+        
+        # 备注
+        st.caption("注：数据来源东方财富实时接口。161226(白银期货)在交易时段会显示最新估值。")
+    else:
+        st.warning("未抓取到数据，请检查网络或代码是否正确。")
